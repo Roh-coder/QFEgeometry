@@ -133,14 +133,17 @@ def _corner_indices(K: int) -> tuple[int, int, int]:
 def build_full_sphere(
     patch_verts: np.ndarray,
     patch_tris: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Tile a single icosahedral face patch across all 20 icosahedral faces to
     produce the full closed spherical mesh.
 
     patch_verts : (N, 3) optimised vertex positions for one face
     patch_tris  : (F, 3) triangle connectivity (0-based, referring to patch)
-    returns     : (all_verts, all_tris) for the full sphere
+    returns     : (all_verts, all_tris, seam_mask)
+                  seam_mask is a bool array of length len(all_verts); True means
+                  the vertex sits on an icosahedral face boundary (shared between
+                  two or more patches).
     """
     n_patch = len(patch_verts)
     K = int(round((-3 + np.sqrt(9 + 8 * (n_patch - 1))) / 2))
@@ -155,22 +158,10 @@ def build_full_sphere(
     # Standard icosahedron faces
     ico_verts, ico_faces = _standard_icosahedron()
 
-    # Find which icosahedral face the patch corners correspond to
-    # by finding whose 3 vertices are closest to src_unit (rotated from standard)
-    # We first find the rotation from standard ico face 0 to our patch face 0
-    # by just using the data: ico_verts is unit-sphere, src_unit is unit-sphere
-    # → find any ico face whose vertices, in some order, are geometrically
-    #   closest to src_unit after a common rotation.
-    #   Since we don't know which iso face = patch face, we build the full set
-    #   of rotations anyway and trust face 0 to be identity-like.
-
-    # For each of the 20 icosahedral faces, compute the rotation that maps
-    # src_corners (face 0 patch corners) → that face's 3 icosahedron vertices.
-    # Then apply that rotation to ALL patch vertices.
-
     coord_map: dict[tuple, int] = {}   # rounded coord → global index
     all_verts: list[np.ndarray] = []
     all_tris:  list[np.ndarray] = []
+    seam_set: set[int] = set()         # global indices of seam vertices
     prec = 6   # decimal places for coordinate matching
 
     for fi, face_idx in enumerate(ico_faces):
@@ -189,13 +180,21 @@ def build_full_sphere(
             if key not in coord_map:
                 coord_map[key] = len(all_verts)
                 all_verts.append(pos)
+            else:
+                # Vertex already registered from a previous face → seam vertex
+                seam_set.add(coord_map[key])
             local_to_global[li] = coord_map[key]
 
         # Remap triangles to global indices
         for tri in patch_tris:
             all_tris.append([local_to_global[int(v)] for v in tri])
 
-    return np.array(all_verts, dtype=float), np.array(all_tris, dtype=int)
+    all_verts_arr = np.array(all_verts, dtype=float)
+    seam_mask = np.zeros(len(all_verts_arr), dtype=bool)
+    for idx in seam_set:
+        seam_mask[idx] = True
+
+    return all_verts_arr, np.array(all_tris, dtype=int), seam_mask
 
 
 # ---------------------------------------------------------------------------
@@ -299,15 +298,16 @@ def build_dual(verts: np.ndarray,
                tris: np.ndarray,
                dual_verts: np.ndarray,
                include_boundary: bool = True
-               ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray]:
+               ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, np.ndarray]:
     """
     Build dual polygons from projected circumcenters.
 
     Returns
     -------
-    polys       : list of (K_i, 3) arrays – one per primal vertex
-    areas       : (N,) float array
-    primal_idx  : (N,) int array – which primal vertex each dual cell belongs to
+    polys         : list of (K_i, 3) arrays – one per primal vertex
+    areas         : (N,) float array
+    primal_idx    : (N,) int array – which primal vertex each dual cell belongs to
+    boundary_mask : (len(polys),) bool array – True if this dual cell is at a boundary vertex
     """
     n_verts = len(verts)
 
@@ -329,9 +329,10 @@ def build_dual(verts: np.ndarray,
             boundary[u] = True
             boundary[v] = True
 
-    polys      : list[np.ndarray] = []
-    areas      : list[float]      = []
-    primal_idx : list[int]        = []
+    polys         : list[np.ndarray] = []
+    areas         : list[float]      = []
+    primal_idx    : list[int]        = []
+    boundary_list : list[bool]       = []
 
     for vi, faces in enumerate(v2f):
         if not include_boundary and boundary[vi]:
@@ -343,8 +344,9 @@ def build_dual(verts: np.ndarray,
         polys.append(ordered)
         areas.append(_polygon_area(ordered))
         primal_idx.append(vi)
+        boundary_list.append(bool(boundary[vi]))
 
-    return polys, np.array(areas, dtype=float), np.array(primal_idx, dtype=int)
+    return polys, np.array(areas, dtype=float), np.array(primal_idx, dtype=int), np.array(boundary_list, dtype=bool)
 
 
 # ---------------------------------------------------------------------------
@@ -473,13 +475,24 @@ def plot_four_panel(
     bins: int = 40,
     cmap: str = "viridis",
     title: str = "",
+    dual_boundary_mask: np.ndarray | None = None,
+    tri_boundary_mask: np.ndarray | None = None,
 ) -> plt.Figure:
-    """3-row panel: primal/dual heatmaps | histograms | bin tables."""
+    """3-row panel: primal/dual heatmaps | histograms | bin tables.
+
+    If dual_boundary_mask / tri_boundary_mask are provided (bool arrays),
+    boundary elements are rendered in gray and excluded from the colour scale
+    and histograms (interior-only mode).
+    """
     from matplotlib.gridspec import GridSpec
 
+    # Interior-only mode: restrict histograms/tables to non-boundary elements
+    _tareas_plot = tareas if tri_boundary_mask is None else tareas[~tri_boundary_mask]
+    _dareas_plot = dareas if dual_boundary_mask is None else dareas[~dual_boundary_mask]
+
     # Pre-compute non-zero histogram bins for the table row
-    p_counts, p_edges = np.histogram(tareas, bins=bins)
-    d_counts, d_edges = np.histogram(dareas, bins=bins)
+    p_counts, p_edges = np.histogram(_tareas_plot, bins=bins)
+    d_counts, d_edges = np.histogram(_dareas_plot, bins=bins)
     p_mask = p_counts > 0
     d_mask = d_counts > 0
     p_table_data = [
@@ -509,21 +522,26 @@ def plot_four_panel(
 
     # ── top-left: primal mesh coloured by triangle area ──────────────────
     ax1 = fig.add_subplot(gs[0, 0], projection="3d")
-    polys_p = verts[tris]
-    coll_p  = Poly3DCollection(polys_p, alpha=0.92,
-                               edgecolor=(0.1, 0.1, 0.1, 0.4), linewidth=0.2)
-    a_min, a_max = tareas.min(), tareas.max()
+    if tri_boundary_mask is not None:
+        interior_t = ~tri_boundary_mask
+    else:
+        interior_t = np.ones(len(tareas), dtype=bool)
+    polys_p = verts[tris[interior_t]]
+    _tareas_int = tareas[interior_t]
+    a_min, a_max = _tareas_int.min(), _tareas_int.max()
     if abs(a_max - a_min) < 1e-14:
         a_max = a_min + 1e-14
     norm_p = mcolors.Normalize(vmin=a_min, vmax=a_max)
     cm_p   = plt.get_cmap("plasma")
-    coll_p.set_facecolor(cm_p(norm_p(tareas)))
+    coll_p = Poly3DCollection(polys_p, alpha=0.92,
+                              edgecolor=(0.1, 0.1, 0.1, 0.4), linewidth=0.2)
+    coll_p.set_facecolor(cm_p(norm_p(_tareas_int)))
     ax1.add_collection3d(coll_p)
     _set_equal_axes(ax1, verts)
     ax1.set_xlabel("x"); ax1.set_ylabel("y"); ax1.set_zlabel("z")
     ax1.set_title("Primal mesh – triangle area")
     sm_p = plt.cm.ScalarMappable(norm=norm_p, cmap=cm_p)
-    sm_p.set_array(tareas)
+    sm_p.set_array(_tareas_int)
     fig.colorbar(sm_p, ax=ax1, fraction=0.025, pad=0.04, label="Triangle area")
 
     # ── top-right: dual mesh coloured by face area ────────────────────────
@@ -535,33 +553,40 @@ def plot_four_panel(
     zs = sphere_centre[2] + sphere_radius * np.outer(np.ones_like(u), np.cos(v))
     ax2.plot_surface(xs, ys, zs, color="#b8d4e8", alpha=0.06,
                      linewidth=0, antialiased=True)
-    d_min, d_max = dareas.min(), dareas.max()
+    if dual_boundary_mask is not None:
+        interior_d = ~dual_boundary_mask
+    else:
+        interior_d = np.ones(len(dareas), dtype=bool)
+    _polys_int = [p for p, m in zip(polys, interior_d) if m]
+    _dareas_int = dareas[interior_d]
+    d_min, d_max = _dareas_int.min(), _dareas_int.max()
     if abs(d_max - d_min) < 1e-14:
         d_max = d_min + 1e-14
     norm_d = mcolors.Normalize(vmin=d_min, vmax=d_max)
     cm_d   = plt.get_cmap(cmap)
-    dcoll  = Poly3DCollection(polys, edgecolor=(0.1, 0.1, 0.1, 0.5),
+    dcoll  = Poly3DCollection(_polys_int, edgecolor=(0.1, 0.1, 0.1, 0.5),
                               linewidth=0.25, alpha=0.95)
-    dcoll.set_facecolor(cm_d(norm_d(dareas)))
+    dcoll.set_facecolor(cm_d(norm_d(_dareas_int)))
     ax2.add_collection3d(dcoll)
-    _set_equal_axes(ax2, np.vstack(polys))
+    _set_equal_axes(ax2, np.vstack(_polys_int) if _polys_int else np.vstack(polys))
     ax2.set_xlabel("x"); ax2.set_ylabel("y"); ax2.set_zlabel("z")
     ax2.set_title("Dual mesh – face area")
     sm_d = plt.cm.ScalarMappable(norm=norm_d, cmap=cm_d)
-    sm_d.set_array(dareas)
+    sm_d.set_array(_dareas_int)
     fig.colorbar(sm_d, ax=ax2, fraction=0.025, pad=0.04, label="Dual face area")
 
     # ── bottom-left: primal triangle area histogram ───────────────────────
     ax3 = fig.add_subplot(gs[1, 0])
-    ax3.hist(tareas, bins=bins, color="#4e79a7", edgecolor="black", alpha=0.85)
-    ax3.set_title("Primal triangle area histogram")
+    hist_title_suffix = " (interior only)" if tri_boundary_mask is not None else ""
+    ax3.hist(_tareas_plot, bins=bins, color="#4e79a7", edgecolor="black", alpha=0.85)
+    ax3.set_title("Primal triangle area histogram" + hist_title_suffix)
     ax3.set_xlabel("Area")
     ax3.set_ylabel("Count")
 
     # ── bottom-right: dual face area histogram ────────────────────────────
     ax4 = fig.add_subplot(gs[1, 1])
-    ax4.hist(dareas, bins=bins, color="#e15759", edgecolor="black", alpha=0.85)
-    ax4.set_title("Dual face area histogram")
+    ax4.hist(_dareas_plot, bins=bins, color="#e15759", edgecolor="black", alpha=0.85)
+    ax4.set_title("Dual face area histogram" + hist_title_suffix)
     ax4.set_xlabel("Area")
     ax4.set_ylabel("Count")
 
@@ -613,7 +638,7 @@ def _run_one_k(rvec_path: Path, tri_path: Path, args) -> "plt.Figure | None":
     print(f"  {len(patch_tris)} triangles  (one icosahedral face = K² = {K**2})")
 
     print("Tiling patch across all 20 icosahedral faces …")
-    verts, tris = build_full_sphere(patch_verts, patch_tris)
+    verts, tris, seam_mask = build_full_sphere(patch_verts, patch_tris)
     print(f"  Full sphere: {len(verts)} vertices  (expected {10*K*K+2}), "
           f"{len(tris)} triangles  (expected {20*K*K})")
 
@@ -624,7 +649,7 @@ def _run_one_k(rvec_path: Path, tri_path: Path, args) -> "plt.Figure | None":
     cc = circumcenters(verts, tris)
     cc_sph = project_to_sphere(cc, centre, radius)
 
-    polys, dareas, pidx = build_dual(
+    polys, dareas, pidx, dual_bnd = build_dual(
         verts, tris, cc_sph,
         include_boundary=not args.exclude_boundary,
     )
@@ -634,6 +659,15 @@ def _run_one_k(rvec_path: Path, tri_path: Path, args) -> "plt.Figure | None":
     tareas = primal_areas(verts, tris)
 
     k_label = f"K={K}"
+    # Triangle seam mask: any vertex is a seam vertex
+    tri_bnd = seam_mask[tris].any(axis=1)
+    # dual_bnd already uses seam_mask via build_dual's boundary detection;
+    # replace with seam-based mask for primal_idx
+    dual_seam = seam_mask[pidx]
+
+    _tri_bnd_arg  = tri_bnd   if getattr(args, 'interior_only', False) else None
+    _dual_bnd_arg = dual_seam if getattr(args, 'interior_only', False) else None
+
     fig = plot_four_panel(
         verts, tris, tareas,
         polys, dareas,
@@ -641,6 +675,8 @@ def _run_one_k(rvec_path: Path, tri_path: Path, args) -> "plt.Figure | None":
         bins=args.bins,
         cmap=args.cmap,
         title=f"Spherical mesh analysis – {k_label}",
+        dual_boundary_mask=_dual_bnd_arg,
+        tri_boundary_mask=_tri_bnd_arg,
     )
     return fig, tareas, dareas, verts, tris, polys, pidx, centre, radius, K, k_label
 
@@ -670,6 +706,8 @@ def main() -> None:
                    help="Colormap for the dual-face heatmap")
     p.add_argument("--exclude-boundary", action="store_true",
                    help="Exclude boundary dual cells (open partial polygons)")
+    p.add_argument("--interior-only", action="store_true",
+                   help="Colour only interior (non-boundary) primal and dual cells; boundary shown in gray")
     p.add_argument("--no-sphere", action="store_true",
                    help="Do not render the background sphere wireframe")
     p.add_argument("--dat",     type=Path, default=None,
@@ -734,7 +772,7 @@ def main() -> None:
     print(f"  {len(patch_tris)} triangles  (one icosahedral face = K² = {K**2})")
 
     print("Tiling patch across all 20 icosahedral faces …")
-    verts, tris = build_full_sphere(patch_verts, patch_tris)
+    verts, tris, seam_mask = build_full_sphere(patch_verts, patch_tris)
     print(f"  Full sphere: {len(verts)} vertices  (expected {10*K*K+2}), "
           f"{len(tris)} triangles  (expected {20*K*K})")
 
@@ -749,7 +787,7 @@ def main() -> None:
     cc_sph = project_to_sphere(cc, centre, radius)
     print("Projected circumcenters onto sphere")
 
-    polys, dareas, pidx = build_dual(
+    polys, dareas, pidx, dual_bnd = build_dual(
         verts, tris, cc_sph,
         include_boundary=not args.exclude_boundary,
     )
@@ -765,6 +803,13 @@ def main() -> None:
 
     k_label = args.rvec.stem.replace("rvec_", "K=")
 
+    # Seam-based interior masks
+    tri_bnd  = seam_mask[tris].any(axis=1)
+    dual_seam = seam_mask[pidx]
+
+    _tri_bnd_arg  = tri_bnd   if args.interior_only else None
+    _dual_bnd_arg = dual_seam if args.interior_only else None
+
     # 4-panel combined figure
     if args.panel is not None or args.show:
         fig_panel = plot_four_panel(
@@ -774,6 +819,8 @@ def main() -> None:
             bins=args.bins,
             cmap=args.cmap,
             title=f"Spherical mesh analysis – {k_label}",
+            dual_boundary_mask=_dual_bnd_arg,
+            tri_boundary_mask=_tri_bnd_arg,
         )
         if args.panel is not None:
             fig_panel.savefig(args.panel, dpi=150, bbox_inches="tight")
