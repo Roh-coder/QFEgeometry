@@ -360,6 +360,31 @@ def primal_areas(verts: np.ndarray, tris: np.ndarray) -> np.ndarray:
     return 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)
 
 
+def primal_triangle_angles(verts: np.ndarray, tris: np.ndarray) -> np.ndarray:
+    """Return interior triangle angles (F,3) in radians."""
+    a = verts[tris[:, 0]]
+    b = verts[tris[:, 1]]
+    c = verts[tris[:, 2]]
+
+    ab = b - a
+    ac = c - a
+    ba = a - b
+    bc = c - b
+    ca = a - c
+    cb = b - c
+
+    def _angle(u: np.ndarray, v: np.ndarray) -> np.ndarray:
+        den = np.linalg.norm(u, axis=1) * np.linalg.norm(v, axis=1)
+        den = np.where(den < 1e-14, 1.0, den)
+        cosang = np.einsum("ij,ij->i", u, v) / den
+        return np.arccos(np.clip(cosang, -1.0, 1.0))
+
+    ang_a = _angle(ab, ac)
+    ang_b = _angle(ba, bc)
+    ang_c = _angle(ca, cb)
+    return np.column_stack([ang_a, ang_b, ang_c])
+
+
 # ---------------------------------------------------------------------------
 # 6.  Plotting helpers
 # ---------------------------------------------------------------------------
@@ -460,6 +485,75 @@ def plot_histograms(tri_areas: np.ndarray,
     ax2.set_ylabel("Count")
 
     fig.suptitle(title)
+    fig.tight_layout()
+    return fig
+
+
+def plot_triangle_angle_scatter(angles_rad: np.ndarray,
+                                use_degrees: bool = False,
+                                centered_at_equilateral: bool = False,
+                                title: str = "Triangle angle scatter") -> plt.Figure:
+    """
+    2D scatter of two triangle angles (x, y) with the third angle in colour.
+    Angles are sorted per triangle so each point is permutation-invariant.
+    """
+    ang = np.sort(angles_rad, axis=1)
+    if use_degrees:
+        unit = "deg"
+        conv = 180.0 / np.pi
+        limit = 180.0
+    else:
+        unit = "rad"
+        conv = 1.0
+        limit = np.pi
+
+    if centered_at_equilateral:
+        ang = ang - (np.pi / 3.0)
+
+    a1 = ang[:, 0] * conv
+    a2 = ang[:, 1] * conv
+    a3 = ang[:, 2] * conv
+
+    fig, ax = plt.subplots(figsize=(7.5, 6.8))
+    if centered_at_equilateral:
+        ax.scatter(a1, a2, color="#2a6fbb", s=18, alpha=0.9, linewidths=0)
+    else:
+        sc = ax.scatter(a1, a2, c=a3, cmap="viridis", s=16, alpha=0.85, linewidths=0)
+
+    if centered_at_equilateral:
+        # In delta variables, delta_1 + delta_2 + delta_3 = 0.
+        ax.axhline(0.0, color="0.4", lw=0.8, alpha=0.6)
+        ax.axvline(0.0, color="0.4", lw=0.8, alpha=0.6)
+
+        # Use data-driven limits so the delta cloud is not visually tiny.
+        xy = np.concatenate([a1, a2])
+        data_min = float(np.min(xy))
+        data_max = float(np.max(xy))
+        span = max(data_max - data_min, 1e-6)
+        pad = max(0.35 * span, 1.0 if use_degrees else 0.02)
+        lo = data_min - pad
+        hi = data_max + pad
+        ax.set_xlim(lo, hi)
+        ax.set_ylim(lo, hi)
+        ax.set_xlabel(f"$\\delta_1=\\alpha_1-\\pi/3$ ({unit})")
+        ax.set_ylabel(f"$\\delta_2=\\alpha_2-\\pi/3$ ({unit})")
+    else:
+        boundary = np.linspace(0.0, limit, 400)
+        ax.plot(boundary, limit - boundary, "k--", lw=1.0, alpha=0.8)
+        ax.set_xlim(0.0, limit)
+        ax.set_ylim(0.0, limit)
+        ax.set_xlabel(f"$\\alpha_1$ ({unit})")
+        ax.set_ylabel(f"$\\alpha_2$ ({unit})")
+        cbar_label = f"$\\alpha_3$ ({unit})"
+
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.25)
+
+    if not centered_at_equilateral:
+        cbar = fig.colorbar(sc, ax=ax)
+        cbar.set_label(cbar_label)
+
     fig.tight_layout()
     return fig
 
@@ -698,6 +792,12 @@ def main() -> None:
                    help="Output path for the dual-mesh heatmap PNG (optional, separate)")
     p.add_argument("--hist",    type=Path, default=None,
                    help="Output path for the area histograms PNG (optional, separate)")
+    p.add_argument("--angles",  type=Path, default=None,
+                   help="Output path for triangle-angle scatter PNG (optional, separate)")
+    p.add_argument("--angles-degrees", action="store_true",
+                   help="Render triangle-angle scatter in degrees (default radians)")
+    p.add_argument("--angles-delta", action="store_true",
+                   help="Plot centered variables delta_i = theta_i - pi/3")
     p.add_argument("--primal",  type=Path, default=None,
                    help="Output path for the primal mesh PNG (optional, separate)")
     p.add_argument("--bins", type=int, default=40,
@@ -859,6 +959,20 @@ def main() -> None:
         print(f"Saved histograms → {args.hist}")
         if not args.show:
             plt.close(fig_hist)
+
+    if args.angles is not None:
+        angles = primal_triangle_angles(verts, tris)
+        fig_angles = plot_triangle_angle_scatter(
+            angles,
+            use_degrees=args.angles_degrees,
+            centered_at_equilateral=args.angles_delta,
+            title=(f"Triangle delta-angle scatter ({k_label})"
+                   if args.angles_delta else f"Triangle angle scatter ({k_label})"),
+        )
+        fig_angles.savefig(args.angles, dpi=180, bbox_inches="tight")
+        print(f"Saved triangle-angle scatter → {args.angles}")
+        if not args.show:
+            plt.close(fig_angles)
 
     if args.show:
         plt.show()
