@@ -40,6 +40,75 @@ These variables are useful because:
 - $a$ is antisymmetric under $1 \leftrightarrow 2$
 - any observable with triangle-label symmetry can be organized cleanly by parity in $a$
 
+For plotting and geometric comparisons, it is important to note that $(s,a)$ is
+not an orthonormal coordinate system on the two-dimensional constraint plane
+
+$$
+\delta_1 + \delta_2 + \delta_3 = 0.
+$$
+
+Using
+
+$$
+\delta_1 = \frac{s + a}{2}, \qquad \delta_2 = \frac{s - a}{2}, \qquad \delta_3 = -s,
+$$
+
+one finds
+
+$$
+\delta_1^2 + \delta_2^2 + \delta_3^2
+= \frac{(s+a)^2}{4} + \frac{(s-a)^2}{4} + s^2
+= \frac{3}{2}s^2 + \frac{1}{2}a^2.
+$$
+
+So the raw $(s,a)$ plot measures distances anisotropically: the $a$ direction is
+stretched by a factor of $\sqrt{3}$ relative to the $s$ direction.
+
+A symmetry-adapted choice is therefore
+
+$$
+\widetilde{a} = \frac{a}{\sqrt{3}},
+$$
+
+for which
+
+$$
+\delta_1^2 + \delta_2^2 + \delta_3^2 = \frac{3}{2}\left(s^2 + \widetilde{a}^2\right).
+$$
+
+Up to the overall scale factor $3/2$, the pair $(s,\widetilde{a})$ is orthonormal on
+the triangle-constraint plane.
+
+This is also the frame in which cyclic relabeling becomes a pure $120^\circ$
+rotation. Under $1 \to 2 \to 3 \to 1$ one gets
+
+$$
+s' = -\frac{1}{2}s - \frac{\sqrt{3}}{2}\widetilde{a},
+\qquad
+\widetilde{a}' = \frac{\sqrt{3}}{2}s - \frac{1}{2}\widetilde{a},
+$$
+
+so that
+
+$$
+\begin{pmatrix}
+s' \\
+\widetilde{a}'
+\end{pmatrix}
+=
+\begin{pmatrix}
+-\frac{1}{2} & -\frac{\sqrt{3}}{2} \\
+\frac{\sqrt{3}}{2} & -\frac{1}{2}
+\end{pmatrix}
+\begin{pmatrix}
+s \\
+\widetilde{a}
+\end{pmatrix}.
+$$
+
+When the goal is to visualize the triangle symmetry directly, the natural scatter
+plot is therefore $(s, a/\sqrt{3})$ rather than raw $(s,a)$.
+
 ## Exact Starting Point
 
 From the rule,
